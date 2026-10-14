@@ -18,8 +18,8 @@ module AES_Top (
     input wire crypto_clk,
     input wire crypto_rstn
 );
-  
-    // APB - Register Interface
+
+    //APB to reg interface
     wire [7:0]  reg_addr;
     wire [31:0] reg_wdata;
     wire [2:0]  reg_pprot;
@@ -62,7 +62,9 @@ module AES_Top (
         .read_en(read_en)
     );
 
-    // Register Interface
+
+    
+    //Register Interface
     wire [127:0] cfg_key;
     wire [127:0] cfg_iv;
     wire cfg_aes_mode;
@@ -83,7 +85,7 @@ module AES_Top (
     wire busy;
     wire busy_sync;
     wire trans_done;
-    wire security_violation;
+    wire zeroize_busy;
 
     Reg_Int #(
         .ADDR_WIDTH(8),
@@ -107,6 +109,7 @@ module AES_Top (
         .cfg_block_mode(cfg_block_mode),
         .cfg_req(cfg_req),
         .cfg_busy(cfg_busy),
+        .zeroize_busy(zeroize_busy),
 
         .start_req(start_req),
         .zeroize_req(zeroize_req),
@@ -120,13 +123,10 @@ module AES_Top (
         .result_fifo_rd_en(result_fifo_rd_en),
 
         .busy(busy_sync),
-        .trans_done(trans_done),
-
-        .security_violation(security_violation)
+        .trans_done(trans_done)
     );
-
-    // Configuration Handshake
-    // PCLK -> crypto_clk
+    
+    //Configuration Handshake
     wire cfg_load;
 
     Handshake CFG_HANDSHAKE (
@@ -140,7 +140,8 @@ module AES_Top (
         .dst_pulse(cfg_load)
     );
 
-    // Start Handshake  PCLK -> crypto_clk
+        
+    //Start Request Handshake
     wire start;
 
     Handshake START_HANDSHAKE (
@@ -153,23 +154,22 @@ module AES_Top (
         .dst_rstn(crypto_rstn),
         .dst_pulse(start)
     );
-  
-    // Zeroize Handshake PCLK -> crypto_clk
+
+    //zeroize handshake
     wire zeroize;
 
     Handshake ZEROIZE_HANDSHAKE (
         .src_clk(PCLK),
         .src_rstn(PRESETn),
         .src_req(zeroize_req),
-        .src_busy(),
+        .src_busy(zeroize_busy),
 
         .dst_clk(crypto_clk),
         .dst_rstn(crypto_rstn),
         .dst_pulse(zeroize)
     );
-
-    // TX FIFO PCLK -> crypto_clk 
-    //128-bit data + last_block
+    
+    //TX FIFO
     wire [128:0] tx_fifo_rdata;
     wire tx_fifo_empty;
     wire tx_fifo_rd_en;
@@ -180,7 +180,8 @@ module AES_Top (
     ) TX_FIFO (
         .wr_clk(PCLK),
         .wr_rstn(PRESETn),
-        .zeroize(zeroize),
+        .zeroize(zeroize_req),
+        .zeroize_rd(zeroize),
 
         .wr_data(data_fifo_wdata),
         .wr_en(data_fifo_wr_en),
@@ -194,9 +195,8 @@ module AES_Top (
         .empty(tx_fifo_empty)
     );
 
-
-
-    // RX FIFO crypto_clk -> PCLK
+    
+    //RX FIFO
     wire [127:0] rx_fifo_wdata;
     wire rx_fifo_wr_en;
     wire rx_fifo_full;
@@ -208,6 +208,7 @@ module AES_Top (
         .wr_clk(crypto_clk),
         .wr_rstn(crypto_rstn),
         .zeroize(zeroize),
+        .zeroize_rd(zeroize_req),
 
         .wr_data(rx_fifo_wdata),
         .wr_en(rx_fifo_wr_en),
@@ -221,15 +222,17 @@ module AES_Top (
         .empty(result_fifo_empty)
     );
 
-    // Busy Synchronizer crypto_clk -> PCLK
-    FF2_Synch BUSY_SYNC (
+    
+    //Busy signal
+    FF2_Synch #(.WIDTH(1))BUSY_SYNC (
         .clk(PCLK),
         .rstn(PRESETn),
         .sync_in(busy),
         .sync_out(busy_sync)
     );
 
-    // Transaction Done Handshake crypto_clk -> PCLK
+
+    //Done Handshake
     wire trans_done_src;
 
     Handshake DONE_HANDSHAKE (
@@ -243,7 +246,7 @@ module AES_Top (
         .dst_pulse(trans_done)
     );
 
-
+    
     //Mode Wrapper
     Block_Mode MODE_WRAPPER (
         .crypto_clk(crypto_clk),
