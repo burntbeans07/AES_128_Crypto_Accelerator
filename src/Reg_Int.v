@@ -22,6 +22,7 @@ module Reg_Int #(
     output reg [1:0] cfg_block_mode,
     output reg cfg_req,
     input wire cfg_busy,
+    input wire zeroize_busy,
 
     //Start and zeroize commands to Mode wrapper through handshake
     output reg start_req,
@@ -35,13 +36,12 @@ module Reg_Int #(
     //RX FIFO - reads data (Crypto to PCLK)
     input wire [127:0]result_fifo_rdata,
     input wire result_fifo_empty,
-    output reg result_fifo_rd_en,
+    output wire result_fifo_rd_en,
 
     //Transaction signals from Mode Wrapper
     input wire busy,
-    input wire trans_done,
-    
-    output wire security_violation
+    input wire trans_done
+
 );
 
     //ADDRESS MAP
@@ -103,6 +103,7 @@ module Reg_Int #(
     reg done_reg;
 
     reg result_read_pending;
+    reg result_read_pending2;
     reg transaction_active;
 
     reg security_violation_reg;
@@ -137,6 +138,7 @@ module Reg_Int #(
 
     wire secure_write,secure_read;
     wire write_only_reg, read_only_reg;
+    reg [3:0] rword,rword_n;
     
     assign secure_write = write_en && !(security_sensitive_access && !reg_pprot[0]);//Not of ( Protected and Unprivileged)
 
@@ -148,8 +150,13 @@ module Reg_Int #(
        (reg_addr >= ADDR_DATA0) && (reg_addr <= ADDR_DATA3);
 
     assign read_only_reg =
-       (reg_addr >= ADDR_RESULT0) && (reg_addr <= ADDR_RESULT3) ||
-       (reg_addr >= ADDR_STATUS);
+       (reg_addr == ADDR_RESULT0) ||
+       (reg_addr == ADDR_RESULT1) ||
+       (reg_addr == ADDR_RESULT2) ||
+       (reg_addr == ADDR_RESULT3) ||
+       (reg_addr == ADDR_STATUS);
+       
+   assign result_fifo_rd_en = &rword_n && !result_fifo_empty;
 
     //Configuration, Control, Data and Result registers
     always @(posedge PCLK or negedge PRESETn) begin
@@ -188,10 +195,8 @@ module Reg_Int #(
             data_fifo_wdata <= 129'b0;
             data_fifo_wr_en <= 1'b0;
 
-            result_fifo_rd_en <= 1'b0;
-            result_read_pending <= 1'b0;
-            result_reg <= 128'b0;
             done_reg <= 1'b0;
+            rword <= 4'b0;
 
             transaction_active <= 1'b0;
 
@@ -199,13 +204,11 @@ module Reg_Int #(
 
             cfg_req <= 1'b0;
             start_req <= 1'b0;
-            zeroize_req <= 1'b0;
             data_fifo_wr_en <= 1'b0;
-            result_fifo_rd_en <= 1'b0;
+            rword <= result_fifo_rd_en ? 4'b0 : rword_n;
             
-
-            if (trans_done) transaction_active <= 1'b0;
-
+            if (zeroize_req && !zeroize_busy) zeroize_req <= 1'b0;
+            
             //ZEROIZE has highest priority
             if (secure_write && reg_addr == ADDR_CONTROL && reg_wdata[ZEROIZE_BIT]) begin
 
@@ -239,12 +242,9 @@ module Reg_Int #(
                 cfg_req <= 1'b0;
 
                 data_fifo_wdata <= 129'b0;
-
-                result_reg <= 128'b0;
                 done_reg <= 1'b0;
-                result_read_pending <= 1'b0;
-
                 transaction_active <= 1'b0;
+                rword <= 4'b0;
 
             end else begin
 
@@ -276,7 +276,7 @@ module Reg_Int #(
                 //Control Register
                 if (secure_write && reg_addr == ADDR_CONTROL) begin
 
-                    if (reg_wdata[START_BIT] && !cfg_busy && !transaction_active && !busy) begin
+                    if (reg_wdata[START_BIT] && !cfg_busy && !transaction_active && !busy && result_fifo_empty) begin
                         cfg_key <= key_reg;
                         cfg_iv <= iv_reg;
                         cfg_aes_mode <= aes_mode_reg;
@@ -286,6 +286,7 @@ module Reg_Int #(
                         start_req <= 1'b1;
                         transaction_active <= 1'b1;
                         done_reg <= 1'b0;
+                        rword <= 4'b1111;
                     end
 
                     if (!transaction_active && !key_lock_reg) begin
@@ -311,24 +312,21 @@ module Reg_Int #(
                     if (reg_addr == ADDR_DATA2)
                         data_word2 <= reg_wdata;
                 
-                    if (reg_addr == ADDR_DATA3) begin
+                    if (reg_addr == ADDR_DATA3 && !data_fifo_full) begin
                         data_fifo_wdata <= {last_block_reg, reg_wdata, data_word2, data_word1, data_word0};
-                
                         data_fifo_wr_en <= 1'b1;
                         last_block_reg <= 1'b0;
                     end
                 end 
 
                 //RX FIFO
+                //result_fifo_rd_en is a registered output (1 cycle to reach the FIFO),
+                //and result_fifo_rdata is itself a registered FIFO read (1 more cycle
+                //to become valid after rd_en is sampled). So the actual data capture
+                //must be pipelined two cycles behind the rd_en pulse, not one.
                 if (trans_done && !result_fifo_empty) begin
-                    result_fifo_rd_en <= 1'b1;
-                    result_read_pending <= 1'b1;
-                end
-
-                if (result_read_pending) begin
-                    result_reg <= result_fifo_rdata;
-                    result_read_pending <= 1'b0;
                     done_reg <= 1'b1;
+                    transaction_active <= 1'b0;
                 end
             end
         end
@@ -341,11 +339,23 @@ module Reg_Int #(
         else if ((write_en || read_en) && security_sensitive_access && !reg_pprot[0])
             security_violation_reg <= 1'b1; //only for security violations not every pslverr
     end
-
+    
+    always @(*) begin
+        rword_n = rword;
+        if (secure_read && done_reg) begin
+            if (reg_addr == ADDR_RESULT0)
+                rword_n[0] = 1'b1;
+            else if (reg_addr == ADDR_RESULT1)
+                rword_n[1] = 1'b1;
+            else if (reg_addr == ADDR_RESULT2)
+                rword_n[2] = 1'b1;
+            else if (reg_addr == ADDR_RESULT3)
+                rword_n[3] = 1'b1;
+        end
+    end
     //APB Read MUX
     always @(*) begin
         reg_rdata = 32'b0;
-
         if (secure_read) begin
             case (reg_addr)
 
@@ -359,20 +369,20 @@ module Reg_Int #(
                 end
 
                 ADDR_STATUS: begin
-                    reg_rdata[0] = busy;
+                    reg_rdata[0] = busy || transaction_active;
                     reg_rdata[1] = done_reg;
                     reg_rdata[2] = data_fifo_full;
                     reg_rdata[3] = result_fifo_empty;
                     reg_rdata[4] = security_violation_reg;
                 end
 
-                ADDR_RESULT0:if (done_reg) reg_rdata = result_reg[31:0];
+                ADDR_RESULT0: if(done_reg) reg_rdata = result_fifo_rdata[31:0];
 
-                ADDR_RESULT1: if (done_reg) reg_rdata = result_reg[63:32];
+                ADDR_RESULT1: if(done_reg) reg_rdata = result_fifo_rdata[63:32];
 
-                ADDR_RESULT2: if (done_reg) reg_rdata = result_reg[95:64];
+                ADDR_RESULT2: if(done_reg) reg_rdata = result_fifo_rdata[95:64];
 
-                ADDR_RESULT3: if (done_reg) reg_rdata = result_reg[127:96];
+                ADDR_RESULT3: if(done_reg) reg_rdata = result_fifo_rdata[127:96];
 
                 ADDR_KEY0, ADDR_KEY1, ADDR_KEY2, ADDR_KEY3: reg_rdata = 32'b0;
 
@@ -401,12 +411,15 @@ module Reg_Int #(
         //Write to read only regs
         if (write_en && read_only_reg)
             reg_pslverr = 1'b1;
+            
+        //Write Data Word3 when fifo is full    
+        if (write_en && reg_addr == ADDR_DATA3 && data_fifo_full)
+            reg_pslverr = 1'b1;
 
         //Start while busy or while outstanding handshake/transaction
-        if (secure_write && reg_addr == ADDR_CONTROL && reg_wdata[START_BIT] && (busy || transaction_active || cfg_busy))
+        if (secure_write && reg_addr == ADDR_CONTROL && reg_wdata[START_BIT] && (busy || transaction_active || cfg_busy || !result_fifo_empty))
             reg_pslverr = 1'b1;
     end
 
-    assign security_violation = security_violation_reg;
 
 endmodule
