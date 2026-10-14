@@ -54,8 +54,7 @@ module Block_Mode (
     reg [2:0] state;
     reg [2:0] ns;
     //fsm states
-    localparam IDLE = 3'd0, WAIT = 3'd1, START_AES = 3'd3, AES_BUSY = 3'd4, DONE = 3'd5;
-    //localparam READ_DATA = 3'd2;
+    localparam IDLE = 3'd0, WAIT = 3'd1, READ_DATA = 3'd2, START_AES = 3'd3, AES_BUSY = 3'd4, DONE = 3'd5;
 
     AES_Core AES (
         .clk(crypto_clk),
@@ -78,7 +77,9 @@ module Block_Mode (
         case (state)
             IDLE: ns = start? WAIT : IDLE; //Idle moves to wait state if start signal received
 
-            WAIT: ns = (!fifo_empty)? START_AES : WAIT;//Wait checks if fifo is empty and asserts rd_en and moves to start_aes
+            WAIT: ns = (!fifo_empty)? READ_DATA : WAIT;//Wait checks if fifo is empty and asserts rd_en
+
+            READ_DATA: ns = START_AES;//One cycle absorbed here for the FIFO's registered rd_data to become valid
 
             START_AES: ns = (!aes_busy)? AES_BUSY : START_AES;//Block Mode specific inputs are loaded and AES computation begins
 
@@ -103,7 +104,6 @@ module Block_Mode (
             block_mode_reg <= 2'b00;
             cbc_reg <= 128'b0;
             counter_reg <= 128'b0;
-            //data_reg <= 128'b0;
             aes_input <= 128'b0;
             aes_start <= 1'b0;
             fifo_rd_en <= 1'b0;
@@ -112,8 +112,7 @@ module Block_Mode (
             busy <= 1'b0;
             state <= IDLE;
             trans_done <= 1'b0;
-            cfg_ack <= 1'b0;
-
+            last_block_reg <= 1'b0;
         end else if(zeroize) begin // All registers cleared - highest priority
             key_reg <= 128'b0;
             iv_reg <= 128'b0;
@@ -130,7 +129,7 @@ module Block_Mode (
             busy <= 1'b0;
             state <= IDLE;
             trans_done <= 1'b0;
-            cfg_ack <= 1'b0;
+            last_block_reg <= 1'b0;
     
         end else begin
             state <= ns;
@@ -139,10 +138,8 @@ module Block_Mode (
             aes_start <= 1'b0;
             fifo_rd_en <= 1'b0;
             fifo_wr_en <= 1'b0;
-            
-            // Inputs from handshake are registered when aes core is idle and enable is given from handshake
-            //Only loaded once per transaction
-            if (load && !busy) begin
+            trans_done <= 1'b0;
+            if (load) begin
                 key_reg <= key_in;
                 iv_reg <= (block_mode_in == 2'b00) ? 128'b0 : iv_in;
                 aes_mode_reg <= (block_mode_in == 2'b10) ? 1'b1 : aes_mode_in;
@@ -155,7 +152,6 @@ module Block_Mode (
                     busy <= 1'b0;
                     if (start) begin
                         busy  <= 1'b1;
-                        //Block Specific registers loaded depending on ECB,CBC or CTR
                         case (block_mode_in)
                             //ECB
                             2'b00: begin
@@ -164,14 +160,14 @@ module Block_Mode (
                             end
                             // CBC
                             2'b01: begin
-                                cbc_reg <= iv_reg;
+                                cbc_reg <= iv_in;
                                 counter_reg <= 128'b0;
                             end
         
                             // CTR
                             2'b10: begin
                                 cbc_reg <= 128'b0;
-                                counter_reg <= iv_reg;
+                                counter_reg <= iv_in;
                             end
         
                             default: begin
@@ -186,20 +182,15 @@ module Block_Mode (
                 WAIT: begin 
                     if (!fifo_empty) begin
                         fifo_rd_en <= 1'b1;
-                        last_block_reg <= last_block;
                     end
                 end
                 
-                /*FIFO data is loaded into data_reg
-                READ_DATA: begin 
-                    data_reg <= fifo_rdata;
-                    state <= START_AES;
-                end*/
-
-                //Block specific input modifications are loaded to aes input and aes_start signal generated
+                READ_DATA: begin end
+                
                 START_AES: begin
                     if(!aes_busy) begin
                         aes_start <= 1'b1;
+                        last_block_reg <= last_block;
                         case (block_mode_reg) //Inputs loaded to AES Core depending on Block Mode
                             2'b00: aes_input <= fifo_rdata; //ECB
 
