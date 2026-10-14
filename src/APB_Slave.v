@@ -8,16 +8,16 @@ module APB_Slave #(
         input wire PSEL,
         input wire PENABLE,
         input wire PWRITE,
-        input wire [2:0] PPROT,
+        input wire [2:0]PPROT,
         input wire [ADDR_WIDTH-1:0]PADDR,
         input wire [DATA_WIDTH-1:0]PWDATA,
     
-        output wire PREADY,
+        output reg PREADY,
         output reg [DATA_WIDTH-1:0] PRDATA,
         output reg PSLVERR,
         
         output wire [ADDR_WIDTH-1:0]reg_addr,
-        output reg [DATA_WIDTH-1:0]reg_wdata,
+        output wire [DATA_WIDTH-1:0]reg_wdata,
         output wire [2:0] reg_pprot,
     
         input wire [DATA_WIDTH-1:0] reg_rdata,
@@ -30,31 +30,26 @@ module APB_Slave #(
     
 
     
-        assign write_en = PSEL && PENABLE && PWRITE && PREADY;
-        assign read_en  = PSEL && PENABLE && !PWRITE && PREADY;
+        assign write_en = PSEL && PENABLE && PWRITE;
+        assign read_en  = PSEL && PENABLE && !PWRITE;
         assign reg_addr  = PADDR;
+        assign reg_wdata = PWDATA;
         assign reg_pprot = PPROT;
-        assign PREADY = !(reg_addr == 8'h34 && data_fifo_full);
-    
-        always @(posedge PCLK or negedge PRESETn) begin
-    
-            if (!PRESETn) begin
-                PRDATA   <= {DATA_WIDTH{1'b0}};
-                PSLVERR  <= 1'b0;
-                reg_wdata <= {DATA_WIDTH{1'b0}};
+
+        always @(*) begin
+            PRDATA  = {DATA_WIDTH{1'b0}};
+            PSLVERR = 1'b0;
+            PREADY  = 1'b0;
+            if (write_en) begin
+                PSLVERR = reg_pslverr;
+                PREADY = 1'b1;
             
-            end else begin
-                PSLVERR   <= 1'b0;
-                
-                if (write_en) begin
-                    reg_wdata <= PWDATA;
-                    PSLVERR   <= reg_pslverr;
-                
-                end else if (read_en) begin
-                    PRDATA   <= reg_rdata;
-                    PSLVERR  <= reg_pslverr;
-                end
+            end else if (read_en) begin
+                PRDATA  = reg_rdata;
+                PSLVERR = reg_pslverr;
+                PREADY = 1'b1;
             end
         end
     
-    endmodule
+endmodule
+
